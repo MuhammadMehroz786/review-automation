@@ -1,0 +1,27 @@
+{
+  "store_url": "https://tarpaulinscompany.co.uk/",
+  "started_at": "2026-01-09T18:44:12.865354",
+  "last_updated": "2026-01-09T19:36:00.701555",
+  "processed_products": [
+    "https://tarpaulinscompany.co.uk/products/abarth-595-turismo-2025-premium-edition-hatchback-car-covers",
+    "https://tarpaulinscompany.co.uk/products/abarth-595-turismo-2025-basic-edition-hatchback-car-covers",
+    "https://tarpaulinscompany.co.uk/products/abarth-595-turismo-2025-indoor-premium-satin-edition-hatchback-car-covers",
+    "https://tarpaulinscompany.co.uk/products/abarth-695-2025-basic-edition-hatchback-car-covers-custom-fit-weather-resistant",
+    "https://tarpaulinscompany.co.uk/products/abarth-595-turismo-2025-indoor-standard-edition-hatchback-car-covers",
+    "https://tarpaulinscompany.co.uk/products/abarth-595-turismo-2025-standard-edition-hatchback-car-covers"
+  ],
+  "stats": {
+    "collections_processed": 0,
+    "products_processed": 6,
+    "reviews_posted": 29,
+    "reviews_failed": 1,
+    "images_generated": 1
+  },
+  "current_product": {
+    "product_url": "https://tarpaulinscompany.co.uk/products/abarth-695-2025-indoor-premium-satin-edition-hatchback-car-covers-custom-fit-dirt-dust-protection",
+    "total_reviews": 4,
+    "reviews_completed": 1,
+    "collection_index": 2,
+    "product_index": 2
+  }
+}

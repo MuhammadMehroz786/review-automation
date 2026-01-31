@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+
+.venv
+.env
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+temp/
+test_images/
+test_screenshots/
+generated_review_images/
+test_ai_images/
+test_review_images/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

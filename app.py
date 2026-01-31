@@ -1,0 +1,611 @@
+# ============================================================
+# FILE: app.py - Flask Backend Server
+# ============================================================
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+import threading
+import os
+import time
+import sys
+from pathlib import Path
+from src.job_manager import job_manager
+
+app = Flask(__name__, static_folder='.')
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
+# Global bot state
+bot_state = {
+    'running': False,
+    'bot_instance': None,
+    'bot_thread': None,
+    'stop_requested': False,
+    'logs': [],
+    'stats': {
+        'productsProcessed': 0,
+        'reviewsPosted': 0,
+        'reviewsFailed': 0,
+        'collectionsProcessed': 0
+    }
+}
+
+
+# Current job being processed (for linking progress with jobs)
+current_job_task_id = None
+
+
+# ============================================================
+# ROUTES
+# ============================================================
+
+@app.route('/')
+def index():
+    """Serve the frontend HTML at http://127.0.0.1:5000"""
+    return send_from_directory('.', 'frontend.html')
+
+
+@app.route('/dashboard')
+def dashboard():
+    """Serve the dashboard HTML"""
+    return send_from_directory('.', 'dashboard.html')
+
+
+# ============================================================
+# DASHBOARD API ENDPOINTS
+# ============================================================
+
+@app.route('/api/dashboard/stats', methods=['GET'])
+def get_dashboard_stats():
+    """Get aggregate statistics for the dashboard"""
+    try:
+        stats = job_manager.get_dashboard_stats()
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/jobs', methods=['GET'])
+def get_jobs():
+    """Get all jobs with optional pagination"""
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        jobs = job_manager.get_all_jobs(limit=limit, offset=offset)
+        
+        # Format dates for JSON
+        for job in jobs:
+            if job.get('created_at'):
+                job['created_at'] = str(job['created_at'])
+            if job.get('updated_at'):
+                job['updated_at'] = str(job['updated_at'])
+        
+        return jsonify({'jobs': jobs})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/jobs/<task_id>', methods=['GET'])
+def get_job(task_id):
+    """Get a specific job by task_id"""
+    try:
+        job = job_manager.get_job(task_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        # Format dates
+        if job.get('created_at'):
+            job['created_at'] = str(job['created_at'])
+        if job.get('updated_at'):
+            job['updated_at'] = str(job['updated_at'])
+        
+        # Get logs for this job
+        logs = job_manager.get_job_logs(task_id)
+        job['logs'] = logs
+        
+        return jsonify(job)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/jobs', methods=['POST'])
+def create_job():
+    """Create a new scrape job"""
+    try:
+        data = request.json
+        source_url = data.get('source_url')
+        
+        if not source_url:
+            return jsonify({'error': 'source_url is required'}), 400
+        
+        job = job_manager.create_job(source_url)
+        if job.get('created_at'):
+            job['created_at'] = str(job['created_at'])
+        if job.get('updated_at'):
+            job['updated_at'] = str(job['updated_at'])
+        
+        return jsonify(job), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/jobs/<task_id>', methods=['DELETE'])
+def delete_job(task_id):
+    """Delete a job"""
+    try:
+        success = job_manager.delete_job(task_id)
+        if success:
+            return jsonify({'success': True, 'message': 'Job deleted'})
+        else:
+            return jsonify({'error': 'Job not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================================
+# ORIGINAL ROUTES
+# ============================================================
+
+
+@app.route('/update-config', methods=['POST', 'OPTIONS'])
+def update_config():
+    """Update a specific configuration field in .env"""
+    # Handle preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        print(f"[UPDATE-CONFIG] Received request")
+        data = request.json
+        print(f"[UPDATE-CONFIG] Data: {data}")
+        field = data.get('field')
+        value = data.get('value')
+
+        if not field or value is None:
+            print(f"[UPDATE-CONFIG] Missing field or value")
+            return jsonify({'success': False, 'message': 'Missing field or value'}), 400
+
+        env_path = Path('.env')
+        env_content = {}
+
+        # Read current .env file
+        if env_path.exists():
+            with open(env_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, val = line.split('=', 1)
+                        env_content[key.strip()] = val.strip()
+
+        # Update the field
+        env_content[field] = value
+
+        # Write back to .env
+        with open(env_path, 'w') as f:
+            f.write("# Store Configuration\n")
+            if 'STORE_URL' in env_content:
+                f.write(f"STORE_URL={env_content['STORE_URL']}\n")
+
+            f.write("\n# API Keys\n")
+            if 'OPENAI_API_KEY' in env_content:
+                f.write(f"OPENAI_API_KEY={env_content['OPENAI_API_KEY']}\n")
+            if 'GEMINI_API_KEY' in env_content:
+                f.write(f"GEMINI_API_KEY={env_content['GEMINI_API_KEY']}\n")
+
+            f.write("\n# Image Generation\n")
+            f.write(f"IMAGE_PROVIDER={env_content.get('IMAGE_PROVIDER', 'gemini')}\n")
+
+            f.write("\n# Bot Settings\n")
+            f.write(f"MIN_REVIEWS_PER_PRODUCT={env_content.get('MIN_REVIEWS_PER_PRODUCT', '4')}\n")
+            f.write(f"MAX_REVIEWS_PER_PRODUCT={env_content.get('MAX_REVIEWS_PER_PRODUCT', '6')}\n")
+            f.write(f"USE_AI_IMAGES={env_content.get('USE_AI_IMAGES', 'true')}\n")
+            f.write(f"HEADLESS={env_content.get('HEADLESS', 'false')}\n")
+            f.write(f"MIN_DELAY={env_content.get('MIN_DELAY', '3')}\n")
+            f.write(f"MAX_DELAY={env_content.get('MAX_DELAY', '6')}\n")
+
+        # Force reload environment variables
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        
+        # Clear the settings module from cache
+        if 'config.settings' in sys.modules:
+            del sys.modules['config.settings']
+
+        add_log('info', f'Configuration updated: {field} = {value}')
+        print(f"[UPDATE-CONFIG] Success: {field} updated")
+
+        return jsonify({'success': True, 'message': f'{field} updated successfully'})
+
+    except Exception as e:
+        print(f"[UPDATE-CONFIG] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/start-bot', methods=['POST', 'OPTIONS'])
+def start_bot():
+    """Start the review bot with user configuration"""
+    # Handle preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    global bot_state
+
+    print(f"[START-BOT] Received request")
+    
+    if bot_state['running']:
+        print(f"[START-BOT] Bot already running")
+        return jsonify({'success': False, 'message': 'Bot is already running'}), 400
+
+    try:
+        config = request.json
+        print(f"[START-BOT] Config received: {config}")
+
+        # Write new .env file
+        env_path = Path('.env')
+        
+        # Determine USE_AI_IMAGES from imageProvider
+        image_provider = config.get('imageProvider', 'gemini')
+        use_ai_images = 'true' if image_provider != 'none' else 'false'
+        
+        env_content = f"""# Store Configuration
+STORE_URL={config['storeUrl']}
+
+# API Keys
+OPENAI_API_KEY={config['apiKey']}
+GEMINI_API_KEY={config.get('geminiApiKey', '')}
+
+# Image Generation
+IMAGE_PROVIDER={image_provider}
+
+# Bot Settings
+MIN_REVIEWS_PER_PRODUCT=4
+MAX_REVIEWS_PER_PRODUCT=6
+USE_AI_IMAGES={use_ai_images}
+HEADLESS=true
+MIN_DELAY=3
+MAX_DELAY=6
+"""
+        with open(env_path, 'w') as f:
+            f.write(env_content)
+
+        # Force reload environment variables immediately
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        # Reset bot state
+        bot_state.update({
+            'logs': [],
+            'stop_requested': False,
+            'stats': {
+                'productsProcessed': 0,
+                'reviewsPosted': 0,
+                'reviewsFailed': 0,
+                'collectionsProcessed': 0
+            }
+        })
+
+        # Start bot in new thread
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        bot_state['bot_thread'] = bot_thread
+        bot_state['running'] = True
+
+        print(f"[START-BOT] Bot started successfully")
+        return jsonify({'success': True, 'message': 'Bot started successfully'})
+
+    except Exception as e:
+        print(f"[START-BOT] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/stop-bot', methods=['POST'])
+def stop_bot():
+    """Stop the running bot"""
+    global bot_state
+
+    if not bot_state['running']:
+        return jsonify({'success': False, 'message': 'Bot is not running'}), 400
+
+    try:
+        bot_state['stop_requested'] = True
+        bot_state['running'] = False
+        add_log('warning', 'Bot stop requested by user')
+        
+        # Clear cached modules for clean restart
+        modules_to_clear = ['config.settings', 'main', 'config']
+        for mod in modules_to_clear:
+            if mod in sys.modules:
+                del sys.modules[mod]
+        
+        return jsonify({'success': True, 'message': 'Bot stop signal sent'})
+
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/resume-bot', methods=['POST'])
+def resume_bot():
+    """Resume the bot using existing configuration from .env"""
+    global bot_state
+
+    if bot_state['running']:
+        return jsonify({'success': False, 'message': 'Bot is already running'}), 400
+
+    try:
+        # Force reload environment variables
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        
+        # Clear cached modules for fresh config
+        modules_to_clear = ['config.settings', 'main', 'config']
+        for mod in modules_to_clear:
+            if mod in sys.modules:
+                del sys.modules[mod]
+
+        # Reset bot state
+        bot_state.update({
+            'logs': [],
+            'stop_requested': False,
+            'stats': {
+                'productsProcessed': 0,
+                'reviewsPosted': 0,
+                'reviewsFailed': 0,
+                'collectionsProcessed': 0
+            }
+        })
+
+        # Start bot in new thread (will resume from progress.json)
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        bot_state['bot_thread'] = bot_thread
+        bot_state['running'] = True
+
+        add_log('info', '🔄 Bot resuming from saved progress...')
+        return jsonify({'success': True, 'message': 'Bot resumed successfully'})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/bot-status', methods=['GET'])
+def bot_status():
+    """Return current bot status and logs"""
+    global bot_state
+    logs = bot_state['logs'].copy()
+    bot_state['logs'] = []
+    return jsonify({
+        'running': bot_state['running'],
+        'logs': logs,
+        **bot_state['stats']
+    })
+
+
+@app.route('/clear-progress', methods=['POST'])
+def clear_progress():
+    """Clear the progress file to start fresh"""
+    try:
+        progress_file = Path('progress.json')
+        
+        if progress_file.exists():
+            progress_file.unlink()
+            add_log('info', '🗑️ Progress file cleared - ready for fresh start')
+            return jsonify({'success': True, 'message': 'Progress cleared successfully'})
+        else:
+            return jsonify({'success': True, 'message': 'No progress file to clear'})
+    
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/check-progress', methods=['GET'])
+def check_progress():
+    """Check if there's saved progress for resume functionality"""
+    try:
+        import json
+        progress_file = Path('progress.json')
+        
+        if not progress_file.exists():
+            return jsonify({
+                'hasProgress': False,
+                'productsProcessed': 0,
+                'reviewsPosted': 0,
+                'currentProduct': None
+            })
+        
+        with open(progress_file, 'r') as f:
+            data = json.load(f)
+        
+        # Check if there's actual progress
+        processed_products = data.get('processed_products', [])
+        current_product = data.get('current_product', None)
+        stats = data.get('stats', {})
+        
+        has_progress = len(processed_products) > 0 or current_product is not None
+        
+        response_data = {
+            'hasProgress': has_progress,
+            'productsProcessed': len(processed_products),
+            'reviewsPosted': stats.get('reviews_posted', 0)
+        }
+        
+        # Add current product info if available
+        if current_product:
+            response_data['currentProduct'] = {
+                'reviewsCompleted': current_product.get('reviews_completed', 0),
+                'totalReviews': current_product.get('total_reviews', 0)
+            }
+        
+        return jsonify(response_data)
+    
+    except Exception as e:
+        return jsonify({
+            'hasProgress': False,
+            'productsProcessed': 0,
+            'reviewsPosted': 0,
+            'error': str(e)
+        })
+
+
+# ============================================================
+# BOT EXECUTION LOGIC
+# ============================================================
+
+def run_bot():
+    """Run the main bot script"""
+    global bot_state, current_job_task_id
+
+    try:
+        add_log('info', 'Initializing bot...')
+
+        # CRITICAL: Force reload .env and clear all cached modules
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        
+        # Clear ALL related modules from cache
+        modules_to_clear = ['config.settings', 'main', 'config']
+        for mod in modules_to_clear:
+            if mod in sys.modules:
+                del sys.modules[mod]
+        
+        # Now import fresh settings
+        from config.settings import settings
+        
+        # Verify we have the right URL
+        add_log('info', f'✓ Loaded store URL from .env: {settings.STORE_URL}')
+        add_log('info', f'✓ OpenAI API Key: {"*" * 20}{settings.OPENAI_API_KEY[-10:] if len(settings.OPENAI_API_KEY) > 10 else "SET"}')
+        add_log('info', f'✓ Reviews per product: {settings.MIN_REVIEWS_PER_PRODUCT}-{settings.MAX_REVIEWS_PER_PRODUCT} (random)')
+        add_log('info', f'✓ AI Images: {settings.USE_AI_IMAGES}')
+        add_log('info', f'✓ Headless mode: {settings.HEADLESS}')
+
+        # Import main module (fresh)
+        import main
+
+        add_log('success', 'Bot initialized successfully')
+        add_log('info', 'Starting review automation...')
+        
+        # Register stop check callback with main module
+        main.set_stop_check(lambda: bot_state['stop_requested'])
+
+        # Create bot instance with FRESH store URL from settings
+        store_url = settings.STORE_URL
+        add_log('info', f'🎯 Creating bot for store: {store_url}')
+        
+        # Create a job in the database for tracking
+        job = job_manager.create_job(store_url)
+        current_job_task_id = job['task_id']
+        add_log('info', f'📋 Created job: {current_job_task_id}')
+
+        bot = main.ReviewBot(store_url=store_url)
+        bot_state['bot_instance'] = bot
+
+        # Stats tracking
+        original_stats = bot.stats
+
+        class StatsTracker(dict):
+            def __setitem__(self, key, value):
+                super().__setitem__(key, value)
+                bot_state['stats']['productsProcessed'] = self.get('products_processed', 0)
+                bot_state['stats']['reviewsPosted'] = self.get('reviews_posted', 0)
+                bot_state['stats']['reviewsFailed'] = self.get('reviews_failed', 0)
+                bot_state['stats']['collectionsProcessed'] = self.get('collections_processed', 0)
+                
+                # Update job in database
+                if current_job_task_id:
+                    job_manager.update_job(
+                        current_job_task_id,
+                        products_found=self.get('products_found', 0),
+                        products_processed=self.get('products_processed', 0),
+                        reviews_posted=self.get('reviews_posted', 0),
+                        reviews_failed=self.get('reviews_failed', 0),
+                        collections_processed=self.get('collections_processed', 0),
+                        images_generated=self.get('images_generated', 0)
+                    )
+
+
+                if hasattr(main, 'web_logs') and main.web_logs:
+                    for log in main.web_logs:
+                        add_log(log['type'], log['message'])
+                    main.web_logs.clear()
+
+                if bot_state['stop_requested']:
+                    add_log('warning', 'Stop signal detected - halting bot...')
+                    raise KeyboardInterrupt("Stop requested by user")
+
+        bot.stats = StatsTracker(original_stats)
+        
+        # Run the bot
+        add_log('info', '▶️  Bot execution starting...')
+        bot.run()
+
+        add_log('success', '🎉 Bot completed all tasks!')
+        
+        # Mark job as completed
+        if current_job_task_id:
+            job_manager.update_job(current_job_task_id, status='completed')
+        
+        bot_state['running'] = False
+
+    except KeyboardInterrupt:
+        add_log('warning', '⚠️ Bot stopped by user')
+        add_log('info', '💾 Progress saved - use Resume Bot to continue')
+        
+        # Mark job as paused
+        if current_job_task_id:
+            job_manager.update_job(current_job_task_id, status='paused', error_message='Stopped by user')
+        
+        bot_state['running'] = False
+    except Exception as e:
+        import traceback
+        add_log('error', f'❌ Bot error: {e}')
+        add_log('info', '💾 Progress saved - use Resume Bot to continue from where it crashed')
+        tb = traceback.format_exc()
+        for line in tb.split('\n')[:5]:  # Show first 5 lines of traceback
+            if line.strip():
+                add_log('error', line.strip())
+        
+        # Mark job as failed
+        if current_job_task_id:
+            job_manager.update_job(current_job_task_id, status='failed', error_message=str(e))
+        
+        bot_state['running'] = False
+
+
+
+def add_log(log_type, message):
+    """Add log entry"""
+    bot_state['logs'].append({'type': log_type, 'message': message, 'timestamp': time.time()})
+    print(f"[{log_type.upper()}] {message}")
+
+
+# ============================================================
+# MAIN ENTRY
+# ============================================================
+
+if __name__ == '__main__':
+    import os
+    
+    # Get port from environment variable (Railway sets this)
+    port = int(os.environ.get('PORT', 5000))
+    
+    print("=" * 70)
+    print("🚀 Review Bot Backend Server")
+    print("=" * 70)
+    print(f"✨ Server running on port: {port}")
+    print("✨ Environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'local')}")
+    print("=" * 70)
+    print("\n⚙️  Configuration will be loaded from .env file")
+    print("💡 Use the web interface to update settings")
+    print("\nWaiting for commands from web interface...")
+    
+    # Use dynamic port and bind to 0.0.0.0 for Railway
+    app.run(debug=False, host='0.0.0.0', port=port, threaded=True)
