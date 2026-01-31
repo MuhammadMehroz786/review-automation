@@ -895,17 +895,90 @@ class LooxReviewPoster:
             return False
     
     def _click_write_review(self) -> bool:
-        """Click 'Write a Review' button - #write"""
+        """Click 'Write a Review' button with multiple selector fallbacks"""
         try:
             logger.info("✍️ Clicking 'Write a Review' button...")
-            
-            self.loox_iframe.wait_for_selector("#write", timeout=15000)
-            self.loox_iframe.click("#write")
-            
-            logger.success("Clicked 'Write a Review'")
-            time.sleep(5)
-            return True
-            
+
+            # Try multiple selectors for the write review button
+            write_selectors = [
+                "#write",                                      # Original selector
+                "button#write",                                # More specific
+                "a#write",                                     # Link version
+                "button:has-text('Write')",                    # Text match
+                "a:has-text('Write')",                         # Link text match
+                "button:has-text('Write a Review')",           # Full text
+                "a:has-text('Write a Review')",                # Full text link
+                "[data-testid='write-review']",                # Data attribute
+                "[data-loox='write-review']",                  # Loox data attribute
+                ".write-review-button",                        # Class name
+                "button.write-review",                         # Button with class
+                "[aria-label*='Write']",                       # Aria label
+                "button[onclick*='review']",                   # Onclick handler
+            ]
+
+            clicked = False
+            for selector in write_selectors:
+                try:
+                    # Check if element exists
+                    count = self.loox_iframe.locator(selector).count()
+                    if count > 0:
+                        logger.debug(f"Found element with selector: {selector}")
+
+                        # Wait for element and click
+                        self.loox_iframe.wait_for_selector(selector, timeout=3000)
+                        self.loox_iframe.click(selector, timeout=3000)
+
+                        logger.success(f"✅ Clicked 'Write a Review' with: {selector}")
+                        clicked = True
+                        time.sleep(5)
+                        break
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {str(e)[:80]}")
+                    continue
+
+            if not clicked:
+                # JavaScript fallback - find any button with "write" text
+                logger.info("Trying JavaScript fallback...")
+                result = self.loox_iframe.evaluate("""
+                    () => {
+                        const buttons = Array.from(document.querySelectorAll('button, a'));
+                        const writeBtn = buttons.find(b =>
+                            b.textContent.toLowerCase().includes('write') ||
+                            b.id.toLowerCase().includes('write') ||
+                            b.className.toLowerCase().includes('write')
+                        );
+                        if (writeBtn) {
+                            writeBtn.click();
+                            return 'Clicked button with text: ' + writeBtn.textContent.trim().substring(0, 50);
+                        }
+                        return false;
+                    }
+                """)
+
+                if result:
+                    logger.success(f"✅ JS fallback: {result}")
+                    clicked = True
+                    time.sleep(5)
+                else:
+                    logger.error("Could not find 'Write a Review' button with any selector")
+
+                    # Dump available buttons for debugging
+                    buttons_info = self.loox_iframe.evaluate("""
+                        () => {
+                            const buttons = Array.from(document.querySelectorAll('button, a'));
+                            return buttons.map(b => ({
+                                tag: b.tagName,
+                                id: b.id,
+                                text: b.textContent.trim().substring(0, 30),
+                                classes: b.className.substring(0, 50)
+                            })).slice(0, 10);
+                        }
+                    """)
+                    logger.error(f"Available buttons in iframe: {buttons_info}")
+                    return False
+
+            return clicked
+
         except Exception as e:
             logger.error(f"Error clicking write review: {e}")
             return False
