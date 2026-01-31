@@ -14,7 +14,7 @@ class BotLogger:
     
     def __init__(self, name="ReviewBot"):
         self.logger = logging.getLogger(name)
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)  # Enable DEBUG level logging
         
         # Clear existing handlers
         self.logger.handlers = []
@@ -28,7 +28,7 @@ class BotLogger:
             # Fallback if reconfigure isn't available
             console_handler.setStream(open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1))
         
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(logging.DEBUG)  # Show DEBUG messages in console
         console_format = logging.Formatter(
             '%(asctime)s - %(levelname)s - %(message)s',
             datefmt='%H:%M:%S'
